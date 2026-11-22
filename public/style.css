@@ -420,6 +420,8 @@ body:has(.ftb) .page { padding-bottom: 96px; }
 .seg-list > li:first-child { border-top-left-radius: var(--r-xl); border-top-right-radius: var(--r-xl); }
 .seg-list > li:last-child { border-bottom-left-radius: var(--r-xl); border-bottom-right-radius: var(--r-xl); }
 .seg-list > li:hover { background: var(--surface-high); }
+.seg-list > li.gone .thumb { opacity: 0.55; }
+.seg-list > li.gone .item-name { text-decoration: line-through; color: var(--on-surface-variant); }
 .seg-list > li.out { animation: item-out var(--d-fast) var(--ease-fx) forwards; }
 @keyframes item-in { from { opacity: 0; transform: translateY(-12px) scale(0.97); } }
 @keyframes item-out { to { opacity: 0; transform: scale(0.95); } }

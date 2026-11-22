@@ -338,6 +338,7 @@ function expired() {
     session = s;
     reauth = null;
     renderHistory();
+    checkHistory();
   });
 }
 
@@ -383,19 +384,20 @@ function itemView({ name, thumb, type, fallback }) {
       meta.replaceChildren(icon('error', 'sm'), document.createTextNode(t('sFailed', { e })));
       meta.className = 'item-meta bad';
     },
-    done(entry, chips = []) {
+    done(entry, chips = [], isGone = false) {
       bar.el.remove();
       el.dataset.key = entry.key;
+      el.classList.toggle('gone', isGone);
       $('.item-name', el).textContent = entry.name;
       $('.item-name', el).title = entry.key;
       meta.replaceChildren(...chips.map(([cls, text]) => Object.assign(document.createElement('span'), { className: `chip ${cls}`, textContent: text })));
       meta.className = 'item-meta';
-      fillActions($('.acts', el), entry, el);
+      fillActions($('.acts', el), entry, el, isGone);
     },
   };
 }
 
-function fillActions(box, entry, el) {
+function fillActions(box, entry, el, isGone = false) {
   const btn = (name, tip, fn) => {
     const b = document.createElement('button');
     b.className = 'btn icon state';
@@ -406,6 +408,10 @@ function fillActions(box, entry, el) {
     box.append(b);
     return b;
   };
+  if (isGone) {
+    btn('delete', t('remove'), () => removeHistory(entry.key));
+    return;
+  }
   btn('link', t('copyUrl'), (b) => copyText(snippet('url', entry), b));
   btn('md', t('copyMd'), (b) => copyText(snippet('md', entry), b));
   btn('code', t('copyHtml'), (b) => copyText(snippet('html', entry), b));
@@ -435,14 +441,17 @@ function fillActions(box, entry, el) {
   }
 }
 
-// ---------- 上传记录（只存本机） ----------
+// ---------- 上传记录（只存本机，每次刷新页面向服务端核对是否已删） ----------
+let goneKeys = new Set();
 const loadHistory = () => JSON.parse(store.get('history', '[]'));
 const saveHistory = (h) => store.set('history', JSON.stringify(h.slice(0, 300)));
 function addHistory(entry) {
+  goneKeys.delete(entry.key);
   saveHistory([entry, ...loadHistory()]);
   renderHistory();
 }
 function removeHistory(key) {
+  goneKeys.delete(key);
   saveHistory(loadHistory().filter((e) => e.key !== key));
   renderHistory();
 }
@@ -453,12 +462,24 @@ function renderHistory() {
   $('#historyEmpty').hidden = list.length > 0;
   $('#clearHistory').hidden = !list.length;
   for (const entry of list) {
-    const ui = itemView({ name: entry.name, thumb: thumbUrl(entry.key), fallback: entry.url, type: entry.type });
-    ui.done(entry, [['', size(entry.size)], ['', when(entry.time)]]);
+    const isGone = goneKeys.has(entry.key);
+    const ui = itemView({ name: entry.name, thumb: isGone ? null : thumbUrl(entry.key), fallback: isGone ? null : entry.url, type: entry.type });
+    const chips = isGone ? [['error', t('deleted')]] : [];
+    chips.push(['', size(entry.size)], ['', when(entry.time)]);
+    ui.done(entry, chips, isGone);
     ul.append(ui.el);
   }
 }
+async function checkHistory() {
+  const keys = loadHistory().map((e) => e.key).filter(Boolean);
+  if (!keys.length) return;
+  const r = await api('/api/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys }) });
+  if (!r.ok || !Array.isArray(r.body.gone)) return;
+  goneKeys = new Set(r.body.gone);
+  if (goneKeys.size) renderHistory();
+}
 $('#clearHistory').onclick = () => {
+  goneKeys.clear();
   saveHistory([]);
   renderHistory();
 };
@@ -466,3 +487,4 @@ $('#clearHistory').onclick = () => {
 // ---------- 启动：先过登录闸门 ----------
 session = await gate('upload', { bg: 'upload' });
 renderHistory();
+checkHistory();

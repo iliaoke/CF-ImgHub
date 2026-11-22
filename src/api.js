@@ -40,6 +40,14 @@ export async function handleApi(request, env, ctx, url) {
   if (method !== 'GET' && !sameOrigin(request, url)) return json({ error: 'bad_origin' }, 403);
 
   if (path === '/api/upload' && method === 'POST') return upload(request, env, ctx, url);
+  // POST /api/check {keys}：批量检查文件是否已被删除（供上传页刷新时核对本机上传记录）
+  if (path === '/api/check' && method === 'POST') {
+    const body = await request.json().catch(() => null);
+    const keys = Array.isArray(body?.keys) ? body.keys.filter(isFileKey).slice(0, 300) : [];
+    const { goneSet } = await getSettings(env);
+    const gone = (await Promise.all(keys.map(async (k) => (goneSet.has(k) || !(await keyExists(env, k)) ? k : null)))).filter(Boolean);
+    return json({ gone });
+  }
   if (path.startsWith('/api/file/') && method === 'DELETE') {
     let key;
     try {
