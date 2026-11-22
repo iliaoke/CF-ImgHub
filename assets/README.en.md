@@ -178,9 +178,20 @@ Several domains: add more custom domains under the Worker's **Settings → Domai
 curl -H "Authorization: Bearer $UPLOAD_TOKEN" \
      -H "Content-Type: image/avif" \
      --data-binary @photo.avif \
-     "https://img.example.com/api/upload?name=photo.avif"
-# Returns JSON with the image link in `url`; add &naming=original to keep the original name
+     "https://img.example.com/api/upload?name=photo.avif&gps=1"
 ```
+
+Returns JSON with the image link in `url`. You can combine any of these query parameters:
+
+| Parameter | Values | Description |
+|------|------|------|
+| `name` | filename | Original filename (used for MIME detection and naming) |
+| `naming` | `std` (default) / `original` | `std` generates a standard name; `original` keeps the original filename |
+| `gps` | `1` / `0` (default) | `1` strips GPS location in-place on the server from photos (JPEG/HEIC/AVIF/WebP/PNG) and videos (MP4/MOV) |
+| `live` | `0` (default) / `1` / `4` | Motion Photo slimming: `1` losslessly strips phone-private trailing data and debug segments; `4` also drops the HDR gain map |
+| `exempt` | `1` / `0` (default) | `1` exempts this file from hotlink protection (allows external embedding) |
+| `domain` | hostname | Rewrites the returned `url` to use this domain (e.g. `img2.example.com`) |
+| `storage` | `r2` / `r2+tg` / `tg` | Overrides the storage mode for this upload (defaults to the global setting) |
 
 ## Local development
 

@@ -6,6 +6,8 @@ import { BG_INTERVALS, isFileKey, MAX_BG, MAX_DOMAINS, MAX_LINKS, MAX_SITES, STO
 import { RSS_READERS } from './serve.js';
 import { hasRole, identify, login, logoutCookie, sameOrigin } from './auth.js';
 import { SIDECAR, TgError, isStub, realSize, tgDelete, tgPut, tgReady } from './telegram.js';
+import { stripGpsBytes } from '../public/gps.js';
+import { parseLive, slimLive } from '../public/live.js';
 
 // 只对 Bearer 调用开放跨域；Cookie 会话是 SameSite=Strict，跨域请求本来就带不上
 const CORS = {
@@ -64,8 +66,8 @@ export async function handleApi(request, env, ctx, url) {
     return json({ ok: true, key });
   }
 
-  // 缩略图（浏览器生成的 WebP，见 public/thumb.js）：登录即可读；上传角色只能给 24 小时内的文件写
-  if (path.startsWith('/api/thumb/') && (method === 'GET' || method === 'POST')) {
+  // 缩略图（浏览器生成的 WebP，见 public/thumb.js）：登录即可读；上传角色只能给 24 小时内的文件写；已删文件移除记录时可顺手删缩略图
+  if (path.startsWith('/api/thumb/') && (method === 'GET' || method === 'POST' || method === 'DELETE')) {
     let key;
     try {
       key = decodeURIComponent(path.slice('/api/thumb/'.length));
@@ -74,6 +76,11 @@ export async function handleApi(request, env, ctx, url) {
     }
     if (!isFileKey(key)) return json({ error: 'bad_key' }, 400);
     if (method === 'GET') return getThumb(env, key);
+    if (method === 'DELETE') {
+      if (!hasRole(role, 'admin') && !(await getSettings(env)).goneSet.has(key) && !recent(key)) return json({ error: 'forbidden' }, 403);
+      await Promise.all(allStores(env).map((s) => s.bucket.delete(THUMB + key)));
+      return json({ ok: true });
+    }
     if (!hasRole(role, 'admin') && !recent(key)) return json({ error: 'forbidden' }, 403);
     return putThumb(env, key, request);
   }
@@ -183,7 +190,7 @@ export async function handleApi(request, env, ctx, url) {
     const body = await request.json().catch(() => null);
     const keys = Array.isArray(body?.keys) ? body.keys.filter(isFileKey) : [];
     if (!keys.length || keys.length > 100) return json({ error: 'bad_key' }, 400);
-    await removeKeys(env, url, keys);
+    await removeKeys(env, url, keys, { keepThumb: true });
     return json({ ok: true, deleted: keys.length });
   }
   if (path === '/api/tg/status' && method === 'GET') return tgStatus(env);
@@ -267,16 +274,63 @@ function recent(key) {
   return Number.isFinite(ts) && Date.now() - ts < UNDO_WINDOW && ts <= Date.now() + 60000;
 }
 
-// POST /api/upload?name=<原文件名>&naming=std|original，请求体就是文件本身（不用 multipart，直接流式写进 R2）
-// naming 默认 std（规范命名）；original 为「13 位时间戳_原文件名」，与旧图床格式相同
+const PROCESS_LIMIT = 64 * 1024 * 1024; // Worker 内字节级处理（去 GPS / 实况精简）的单文件上限
+
+// POST /api/upload?name=<原文件名>&naming=std|original&gps=1|0&live=0|1|4&exempt=1|0&domain=<域名>&storage=r2|r2+tg|tg
+// 请求体就是文件本身（不用 multipart）；未开启 gps/live 时直接流式写进 R2/Telegram，开启则在内存里原地处理后再写入
 async function upload(request, env, ctx, url) {
-  const length = Number(request.headers.get('Content-Length'));
+  let length = Number(request.headers.get('Content-Length'));
   if (!request.body || !Number.isFinite(length) || length <= 0) return json({ error: 'empty_body' }, 411);
 
-  const name = sanitizeName(url.searchParams.get('name') || 'file');
+  const sp = url.searchParams;
+  const flag = (k) => sp.get(k) === '1' || sp.get(k) === 'true';
+  const wantGps = flag('gps');
+  const wantExempt = flag('exempt');
+  const liveRaw = sp.get('live');
+  const liveLevel = liveRaw === null || liveRaw === '' ? 0 : Number(liveRaw);
+  if (!Number.isInteger(liveLevel) || liveLevel < 0 || liveLevel > 4) return json({ error: 'bad_request' }, 400);
+
+  let linkOrigin = url.origin;
+  if (sp.get('domain')) {
+    const host = normSite(sp.get('domain'));
+    if (!host) return json({ error: 'bad_site', site: sp.get('domain') }, 400);
+    linkOrigin = `https://${host}`;
+  }
+
+  let mode;
+  if (sp.get('storage')) {
+    const s = sp.get('storage');
+    if (!STORAGE_MODES.includes(s)) return json({ error: 'bad_request' }, 400);
+    if (s !== 'r2' && !tgReady(env)) return json({ error: 'tg_not_configured' }, 400);
+    mode = s;
+  } else {
+    mode = await storageMode(env);
+  }
+
+  const name = sanitizeName(sp.get('name') || 'file');
   const contentType = pickContentType(name, request.headers.get('Content-Type'));
   const store = writeStore(env);
-  const original = url.searchParams.get('naming') === 'original';
+  const original = sp.get('naming') === 'original';
+
+  let u8 = null;
+  let gpsRemoved = false;
+  let liveSlimmed = false;
+  if ((wantGps || liveLevel > 0) && length <= PROCESS_LIMIT) {
+    u8 = new Uint8Array(await request.arrayBuffer());
+    if (u8.byteLength !== length) length = u8.byteLength;
+    if (liveLevel > 0 && u8[0] === 0xff && u8[1] === 0xd8) {
+      const live = parseLive(u8);
+      if (live) {
+        const out = await slimLive(live, liveLevel, () => null, () => ({ skip: 'unsupported' }));
+        if (out.bytes.byteLength < u8.byteLength) {
+          u8 = out.bytes;
+          length = u8.byteLength;
+          liveSlimmed = true;
+        }
+      }
+    }
+    if (wantGps && stripGpsBytes(u8) > 0) gpsRemoved = true;
+  }
 
   // 冲突概率极低（同毫秒同名 / 同秒且 20 位随机码相同），仍然检查一下；已删除名单里的 key 也不复用（读路径会挡掉）
   const { goneSet } = await getSettings(env);
@@ -288,13 +342,12 @@ async function upload(request, env, ctx, url) {
   const fileName = original ? name : key;
   const httpMetadata = { contentType, contentDisposition: `inline; filename*=UTF-8''${encodeURIComponent(fileName)}` };
   const custom = original ? {} : { name };
-  const mode = await storageMode(env);
   let size;
   if (mode === 'tg') {
     // 只存 Telegram：文件流式发到频道，R2 里放占位对象（正文是清单）
     let manifest;
     try {
-      manifest = await tgPut(env, key, request.body, length);
+      manifest = await tgPut(env, key, u8 ? new Blob([u8]).stream() : request.body, length);
     } catch (err) {
       console.warn(JSON.stringify({ event: 'tg-upload-failed', key, error: err.message }));
       return json({ error: 'tg_failed' }, 502);
@@ -302,7 +355,7 @@ async function upload(request, env, ctx, url) {
     await store.bucket.put(key, JSON.stringify(manifest), { httpMetadata, customMetadata: { ...custom, tg: '1', size: String(length) } });
     size = length;
   } else {
-    const obj = await store.bucket.put(key, request.body, { httpMetadata, customMetadata: original ? undefined : custom });
+    const obj = await store.bucket.put(key, u8 ?? request.body, { httpMetadata, customMetadata: original ? undefined : custom });
     size = obj.size;
     // 备份在回应之后做，不拖慢上传；失败的可以在设置页补备份
     if (mode === 'r2+tg') {
@@ -310,8 +363,21 @@ async function upload(request, env, ctx, url) {
     }
   }
 
-  // 从哪个域名进来就用哪个域名；要换成其他绑定域名由前端改写（见 ui.js 的 linkOf）
-  return json({ key, url: `${url.origin}/file/${encodeURIComponent(key)}`, size, contentType, store: mode === 'tg' ? 'tg' : store.binding });
+  if (wantExempt) {
+    await updateSettings(env, (cur) => ({ ...cur, exempt: [...new Set([...cur.exempt, key])] }));
+  }
+
+  // 默认从哪个域名进来就用哪个域名，也可由 ?domain= 指定；网页端还能在前端按顶栏所选域名改写（见 ui.js 的 linkOf）
+  return json({
+    key,
+    url: `${linkOrigin}/file/${encodeURIComponent(key)}`,
+    size,
+    contentType,
+    store: mode === 'tg' ? 'tg' : store.binding,
+    ...(gpsRemoved ? { gpsRemoved: true } : {}),
+    ...(liveSlimmed ? { liveSlimmed: true } : {}),
+    ...(wantExempt ? { exempt: true } : {}),
+  });
 }
 
 // 规范名：ImgHub-YYYYMMDD-HHmmss-xxxx.ext，时间按 UTC+8；随机码用去掉 0/o/1/l 的 32 个字符，防同秒冲突、也防按时间猜链接
@@ -436,8 +502,8 @@ async function keyExists(env, key) {
   return Boolean(await configStore(env).bucket.head(SIDECAR + key));
 }
 
-// 从所有桶删除。Cache API 只能清当前机房的缓存，其他机房要等过期或在面板清除
-async function removeKeys(env, url, keys) {
+// 从所有桶删除。后台删除时保留 .thumb/ 缩略图，供上传页「上传记录」在显示「已删除」时仍能认出是哪张图
+async function removeKeys(env, url, keys, { keepThumb = false } = {}) {
   const stores = allStores(env);
   const main = configStore(env).bucket;
   // Telegram 里的消息（备份清单与占位对象里记着 message_id）也删掉；删不掉不影响 R2 的删除
@@ -449,8 +515,9 @@ async function removeKeys(env, url, keys) {
       for (const s of stores) if (isStub(await s.bucket.head(key))) await collect(await s.bucket.get(key));
     }),
   );
+  const toDelete = keepThumb ? keys : [...keys, ...keys.map((k) => THUMB + k)];
   await Promise.all([
-    ...stores.map((s) => s.bucket.delete([...keys, ...keys.map((k) => THUMB + k)])),
+    ...stores.map((s) => s.bucket.delete(toDelete)),
     main.delete(keys.map((k) => SIDECAR + k)),
   ]);
   if (msgs.length && tgReady(env)) {

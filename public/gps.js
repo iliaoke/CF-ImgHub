@@ -9,11 +9,15 @@ const WEBP_EXIF = [0x45, 0x58, 0x49, 0x46]; // WebP "EXIF" chunk
 const PNG_EXIF = [0x65, 0x58, 0x49, 0x66]; // PNG "eXIf" chunk
 const QT_LOC = [0x63, 0x6f, 0x6d, 0x2e, 0x61, 0x70, 0x70, 0x6c, 0x65, 0x2e, 0x71, 0x75, 0x69, 0x63, 0x6b, 0x74, 0x69, 0x6d, 0x65, 0x2e, 0x6c, 0x6f, 0x63, 0x61, 0x74, 0x69, 0x6f, 0x6e]; // "com.apple.quicktime.location"
 
+/** 原地清除 u8 中的 GPS 信息，返回清除的处数（供浏览器与 Worker 服务端共用） */
+export function stripGpsBytes(u8) {
+  return stripExif(u8) + stripXmp(u8) + stripMp4(u8);
+}
+
 /** 返回去掉定位后的 Blob；没有定位信息时返回原 Blob */
 export async function stripGps(blob) {
   const u8 = new Uint8Array(await blob.arrayBuffer());
-  const n = stripExif(u8) + stripXmp(u8) + stripMp4(u8);
-  return n ? new Blob([u8], { type: blob.type }) : blob;
+  return stripGpsBytes(u8) ? new Blob([u8], { type: blob.type }) : blob;
 }
 
 // 在 u8 里找字节序列，返回下标或 -1

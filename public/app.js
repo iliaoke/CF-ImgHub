@@ -409,7 +409,10 @@ function fillActions(box, entry, el, isGone = false) {
     return b;
   };
   if (isGone) {
-    btn('delete', t('remove'), () => removeHistory(entry.key));
+    btn('delete', t('remove'), () => {
+      api(thumbUrl(entry.key), { method: 'DELETE' });
+      removeHistory(entry.key);
+    });
     return;
   }
   btn('link', t('copyUrl'), (b) => copyText(snippet('url', entry), b));
@@ -463,7 +466,7 @@ function renderHistory() {
   $('#clearHistory').hidden = !list.length;
   for (const entry of list) {
     const isGone = goneKeys.has(entry.key);
-    const ui = itemView({ name: entry.name, thumb: isGone ? null : thumbUrl(entry.key), fallback: isGone ? null : entry.url, type: entry.type });
+    const ui = itemView({ name: entry.name, thumb: thumbUrl(entry.key), fallback: isGone ? null : entry.url, type: entry.type });
     const chips = isGone ? [['error', t('deleted')]] : [];
     chips.push(['', size(entry.size)], ['', when(entry.time)]);
     ui.done(entry, chips, isGone);
@@ -479,6 +482,7 @@ async function checkHistory() {
   if (goneKeys.size) renderHistory();
 }
 $('#clearHistory').onclick = () => {
+  for (const k of goneKeys) api(thumbUrl(k), { method: 'DELETE' });
   goneKeys.clear();
   saveHistory([]);
   renderHistory();

@@ -178,9 +178,20 @@
 curl -H "Authorization: Bearer $UPLOAD_TOKEN" \
      -H "Content-Type: image/avif" \
      --data-binary @photo.avif \
-     "https://img.example.com/api/upload?name=photo.avif"
-# 返回 JSON，其中 url 为图片链接；加 &naming=original 保持原文件名
+     "https://img.example.com/api/upload?name=photo.avif&gps=1"
 ```
+
+返回 JSON，其中 `url` 为图片链接。可通过查询参数自由组合以下功能：
+
+| 参数 | 可选值 | 说明 |
+|------|------|------|
+| `name` | 文件名 | 原文件名（用于识别类型与生成规范名） |
+| `naming` | `std`（默认）/ `original` | `std` 为规范命名，`original` 保持原文件名 |
+| `gps` | `1` / `0`（默认） | `1` 时在服务端原地清除照片（JPEG/HEIC/AVIF/WebP/PNG）与视频（MP4/MOV）中的 GPS 定位 |
+| `live` | `0`（默认）/ `1` / `4` | 实况照片瘦身：`1` 无损去掉手机私有尾部与调试段；`4` 再去掉 HDR 增益图 |
+| `exempt` | `1` / `0`（默认） | `1` 时将该文件单独加入防盗链放行名单（允许外链） |
+| `domain` | 域名 | 指定返回 `url` 使用的域名（如 `img2.example.com`） |
+| `storage` | `r2` / `r2+tg` / `tg` | 单独指定本次上传的存储方式（不传则跟随后台设置） |
 
 ## 本地开发
 

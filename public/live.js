@@ -53,7 +53,7 @@ function items(xmp) {
 
 /** 拆解实况 JPEG；认不出就返回 null（调用方原样上传） */
 export function parseLive(buf) {
-  const u8 = new Uint8Array(buf);
+  const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
   let head;
   try {
     head = segments(u8);
@@ -226,7 +226,8 @@ const VIDEO_BPP = { high: 0.14, balanced: 0.1, small: 0.07 };
  * 返回 { bytes } | { skip: 'low' }（原片码率已低）| { skip: 'unsupported' }（浏览器不能编 HEVC）
  */
 export async function transcodeVideo(video, quality = 'balanced', onProgress) {
-  const mb = await import('./vendor/mediabunny.min.mjs');
+  const mbUrl = './vendor/mediabunny.min.mjs';
+  const mb = await import(/* @vite-ignore */ mbUrl);
   const input = new mb.Input({ source: new mb.BufferSource(video), formats: mb.ALL_FORMATS });
   const track = await input.getPrimaryVideoTrack();
   if (!track) return { skip: 'unsupported' };
