@@ -40,6 +40,11 @@ function apply(s) {
   settings = s;
   for (const row of document.querySelectorAll('[data-flag]')) setToggle($('.toggle', row), s[row.dataset.flag]);
   for (const row of document.querySelectorAll('[data-bg]')) setToggle($('.toggle', row), s.bg[row.dataset.bg]);
+  const noteEl = $('[data-flag="hotlink"] small');
+  if (noteEl) {
+    noteEl.dataset.i18n = s.rss === false ? 'hotlinkNoteNoRss' : 'hotlinkNote';
+    noteEl.textContent = t(noteEl.dataset.i18n);
+  }
   $('#rssNote').textContent = t('rssNote', { list: (s.rssReaders ?? []).join(', ') });
   renderChips('allow');
   renderChips('domains');
@@ -212,7 +217,7 @@ function bgPath(s) {
 $('#bgForm').onsubmit = async (e) => {
   e.preventDefault();
   const input = $('#bgUrl');
-  const add = input.value.split(/\s+/).filter(Boolean).map(bgPath);
+  const add = input.value.split(/[\s,，、]+/).filter(Boolean).map(bgPath);
   if (!add.length) return input.focus();
   const next = [...new Set([...settings.bg.urls, ...add])];
   if (next.length > MAX_BG) return snack(t('bgMax'), { error: true });

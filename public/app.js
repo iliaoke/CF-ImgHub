@@ -254,9 +254,12 @@ async function processFile(file) {
     }
 
     if (opts.gps === '1') {
+      // 普通图片经 canvas 转码后已去除全部 EXIF；额外对原文件做一次检测，若原图确实含定位则同样给出「已去除定位」标记
       const clean = await stripGps(blob);
       if (clean !== blob) {
         blob = clean;
+        chips.push(['', t('gpsRemoved')]);
+      } else if (blob !== file && !reason && (await stripGps(file)) !== file) {
         chips.push(['', t('gpsRemoved')]);
       }
     }
@@ -334,6 +337,7 @@ function expired() {
   reauth = gate('upload', { bg: 'upload' }).then((s) => {
     session = s;
     reauth = null;
+    renderHistory();
   });
 }
 

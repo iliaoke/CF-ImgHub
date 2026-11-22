@@ -675,7 +675,12 @@ export function topbarShadow() {
 
 export function snippet(kind, entry) {
   const url = linkOf(entry.url);
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
   if (kind === 'md') return `![${entry.name.replace(/[[\]\\]/g, '\\$&')}](${url})`;
-  if (kind === 'html') return `<img src="${url}" alt="${entry.name.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" loading="lazy">`;
+  if (kind === 'html') {
+    if (entry.type?.startsWith('video/')) return `<video src="${esc(url)}" controls preload="metadata"></video>`;
+    if (entry.type?.startsWith('audio/')) return `<audio src="${esc(url)}" controls preload="metadata"></audio>`;
+    return `<img src="${esc(url)}" alt="${esc(entry.name)}" loading="lazy">`;
+  }
   return url;
 }

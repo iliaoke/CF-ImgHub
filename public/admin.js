@@ -31,7 +31,7 @@ document.addEventListener('langchange', () => {
 });
 
 // ---------- 防盗链设置 ----------
-let settings = { hotlink: false, allow: [], exempt: [], domains: [] };
+let settings = { hotlink: false, rss: true, allow: [], exempt: [], domains: [] };
 let exempt = new Set();
 const setToggle = (b, on) => b.setAttribute('aria-checked', String(on));
 function applySettings(s) {
@@ -39,6 +39,10 @@ function applySettings(s) {
   exempt = new Set(s.exempt);
   setToggle($('#hotlink'), s.hotlink);
   $('.stat.s4').classList.toggle('on', s.hotlink);
+  const noteKey = s.rss === false ? 'hotlinkNoteNoRss' : 'hotlinkNote';
+  $('.stat.s4').dataset.i18nTip = noteKey;
+  $('.stat.s4').title = t(noteKey);
+  $('.stat.s4').setAttribute('aria-label', t(noteKey));
   $('#hotlinkState').textContent = t(s.hotlink ? 'hotlinkOn' : 'hotlinkOff');
   $('#exemptCount').textContent = t('exemptN', { n: exempt.size });
   for (const el of document.querySelectorAll('.tile')) el.classList.toggle('exempt', exempt.has(el.dataset.key));
@@ -110,7 +114,7 @@ async function load() {
 
 function render() {
   const q = query.toLowerCase();
-  view = all.filter((o) => (filter === 'all' || kindOf(o) === filter) && (!q || nameOf(o).toLowerCase().includes(q) || o.name?.toLowerCase().includes(q)));
+  view = all.filter((o) => (filter === 'all' || kindOf(o) === filter) && (!q || o.key.toLowerCase().includes(q) || nameOf(o).toLowerCase().includes(q) || o.name?.toLowerCase().includes(q)));
   shown = 0;
   $('#grid').replaceChildren();
   for (const b of $('#filters').children) b.classList.toggle('on', b.dataset.v === filter);
@@ -154,7 +158,7 @@ function tile(o, i) {
     media.append(icon(kindOf(o) === 'video' ? 'movie' : 'file'));
   }
   $('.check', el).append(icon('check'));
-  $('.check', el).setAttribute('aria-label', t('selectAll'));
+  $('.check', el).setAttribute('aria-label', nameOf(o));
   $('.cap b', el).textContent = nameOf(o);
   if (o.name) el.title = o.name;
   $('.cap span', el).textContent = `${size(o.size)} · ${when(timeOf(o), 'short')}`;
@@ -301,7 +305,7 @@ async function remove(keys) {
 const dlg = $('#detail');
 function openDetail(o) {
   current = o;
-  const entry = { url: o.url, name: o.name || nameOf(o) };
+  const entry = { url: o.url, name: o.name || nameOf(o), type: o.contentType };
   const pv = $('.preview', dlg);
   pv.replaceChildren();
   if (kindOf(o) === 'image') {
