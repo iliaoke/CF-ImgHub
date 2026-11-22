@@ -48,6 +48,7 @@ const MAX_GONE = 20000;
 
 let memo = null;
 let memoAt = 0;
+let queue = Promise.resolve();
 
 // fresh：改设置前读最新值，免得用了本 isolate 里过期的副本、覆盖掉别处刚写的修改
 export async function getSettings(env, { fresh = false } = {}) {
@@ -73,6 +74,16 @@ export async function saveSettings(env, next) {
   memo = withSets(data);
   memoAt = Date.now();
   return data;
+}
+
+// 同一 isolate 内的读-改-写串行化，避免连续删除或同时改设置时互相覆盖
+export function updateSettings(env, fn) {
+  const run = queue.then(async () => {
+    const cur = await getSettings(env, { fresh: true });
+    return saveSettings(env, await fn(cur));
+  });
+  queue = run.catch(() => {});
+  return run;
 }
 
 const withSets = (d) => ({ ...d, exemptSet: new Set(d.exempt), domainSet: new Set(d.domains), goneSet: new Set(d.gone.map(([k]) => k)) });

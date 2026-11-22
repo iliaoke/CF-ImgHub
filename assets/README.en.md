@@ -132,7 +132,9 @@ Skip this if you don't need it; R2 alone works fine. Three modes:
 |------|------|
 | R2 only (default) | Fastest |
 | R2 + Telegram | Served from R2 with a copy in Telegram (for disaster recovery); falls back to Telegram if a file is missing from R2 |
-| Telegram only | Uses no R2 space (R2 keeps a tiny index); uncached images take 0.5–3 s to open; up to 100 MB per file |
+| Telegram only | Uses no R2 space (R2 keeps a tiny index); uncached images take 0.5–3 s to open |
+
+(Cloudflare Workers limits single upload request bodies to 100 MB across all modes.)
 
 1. **Create a bot**: open [@BotFather](https://t.me/BotFather) in Telegram, send `/newbot` and follow the prompts. You get a token like `123456789:AA…`. It is the bot's password; keep it private
 2. **Create a channel**: a private one is fine
@@ -142,7 +144,7 @@ Skip this if you don't need it; R2 alone works fine. Three modes:
 6. **Pick a mode**: open `https://img.example.com/settings` and choose where new uploads go under **Storage**
 7. **Back up existing files** (optional): click **Back up** next to **Back up existing files to Telegram**. With many files Telegram rate-limits; the page waits and continues on its own, so keep it open
 
-Switching modes only affects later uploads. Deleting an image also deletes its messages in the channel.
+Switching modes only affects later uploads. Deleting an image also deletes its messages in the channel if uploaded within the last 48 hours (Telegram's Bot API only allows bots to delete messages up to 48 hours old; older image links still stop working immediately when deleted, though their channel messages must be removed manually).
 
 ### Changing passwords or settings later
 

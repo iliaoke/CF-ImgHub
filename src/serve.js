@@ -9,6 +9,7 @@ const LONG_CACHE = 'public, max-age=31536000, immutable, no-transform';
 const MISS_CACHE = 'public, max-age=60';
 const CACHE_PUT_LIMIT = 512 * 1024 * 1024; // Cache API 单个对象上限
 const LEGACY_LIMIT = 100 * 1024 * 1024; // 回源迁移时整个读进内存，超过就只转发不迁移
+const filling = new Set(); // 正在后台填缓存的 cacheUrl，避免视频多次 Range 探测触发重复全量拉取
 // 防盗链内建放行的网页版 RSS 阅读器（含所有子域名）：它们会带自己域名的 Referer（App 版通常不带，本来就放行）。
 // 设置里 rss=false 时不放行这份名单。博客等其他网站由设置页填写（allow）；图床自己的域名另外放行
 export const RSS_READERS = [
@@ -96,8 +97,28 @@ async function fromStore(env, bucket, key, request, bg) {
 
   if (obj.range && request.headers.has('Range')) {
     const { start, end } = rangeOf(obj.range, obj.size);
+    const fullHeaders = new Headers(headers);
+    fullHeaders.set('Content-Length', String(obj.size));
     headers.set('Content-Range', `bytes ${start}-${end}/${obj.size}`);
     headers.set('Content-Length', String(end - start + 1));
+    // Range: bytes=0- 实际上覆盖了完整文件，直接分流写缓存；若是局部 Range 则后台单次拉完整对象进缓存，后续 Range 由 Cache API 切
+    if (obj.size <= CACHE_PUT_LIMIT) {
+      if (start === 0 && end === obj.size - 1) {
+        const [b1, b2] = obj.body.tee();
+        bg.ctx.waitUntil(bg.cache.put(new Request(bg.cacheUrl), new Response(b2, { status: 200, headers: fullHeaders })).catch((e) => console.warn('cache.put failed', e.message)));
+        return new Response(b1, { status: 206, headers });
+      }
+      if (!filling.has(bg.cacheUrl)) {
+        filling.add(bg.cacheUrl);
+        bg.ctx.waitUntil(
+          bucket
+            .get(key)
+            .then((full) => full && bg.cache.put(new Request(bg.cacheUrl), new Response(full.body, { status: 200, headers: fullHeaders })))
+            .catch((e) => console.warn('r2 cache fill failed', e.message))
+            .finally(() => filling.delete(bg.cacheUrl)),
+        );
+      }
+    }
     return new Response(obj.body, { status: 206, headers });
   }
   headers.set('Content-Length', String(obj.size));
@@ -133,16 +154,25 @@ async function fromTelegram(env, request, headers, manifest, bg) {
     console.warn(JSON.stringify({ event: 'tg-read-failed', error: err.message }));
     return plain(502, 'Telegram unavailable');
   }
-  // Range 回应不进缓存：后台把整个文件取一遍放进缓存，之后的 Range 请求由 Cache API 直接切
+  // Range 回应不进缓存：若 Range 刚好覆盖完整文件（如 bytes=0-），直接分流进缓存；否则后台单次把完整文件取进缓存
   if (range && size <= CACHE_PUT_LIMIT) {
     const full = new Headers(headers);
     full.delete('Content-Range');
     full.set('Content-Length', String(size));
-    bg.ctx.waitUntil(
-      tgStream(env, manifest)
-        .then((b) => bg.cache.put(new Request(bg.cacheUrl), new Response(b, { status: 200, headers: full })))
-        .catch((err) => console.warn('tg cache fill failed', err.message)),
-    );
+    if (start === 0 && end === size - 1) {
+      const [b1, b2] = body.tee();
+      bg.ctx.waitUntil(bg.cache.put(new Request(bg.cacheUrl), new Response(b2, { status: 200, headers: full })).catch((err) => console.warn('tg cache fill failed', err.message)));
+      return new Response(b1, { status: 206, headers });
+    }
+    if (!filling.has(bg.cacheUrl)) {
+      filling.add(bg.cacheUrl);
+      bg.ctx.waitUntil(
+        tgStream(env, manifest)
+          .then((b) => bg.cache.put(new Request(bg.cacheUrl), new Response(b, { status: 200, headers: full })))
+          .catch((err) => console.warn('tg cache fill failed', err.message))
+          .finally(() => filling.delete(bg.cacheUrl)),
+      );
+    }
   }
   return new Response(body, { status: range ? 206 : 200, headers });
 }

@@ -2,7 +2,7 @@
 // 错误只返回代码（error 字段），由前端按语言翻译
 import { pickContentType } from './mime.js';
 import { allStores, BRAND, configStore, keyTime, storesFor, writeStore } from './stores.js';
-import { BG_INTERVALS, isFileKey, MAX_BG, MAX_DOMAINS, MAX_LINKS, MAX_SITES, STORAGE_MODES, THEME_MODES, getSettings, normThemeColor, normBgUrl, normLink, normName, normSite, publicSettings, saveSettings, siteInfo } from './settings.js';
+import { BG_INTERVALS, isFileKey, MAX_BG, MAX_DOMAINS, MAX_LINKS, MAX_SITES, STORAGE_MODES, THEME_MODES, getSettings, normThemeColor, normBgUrl, normLink, normName, normSite, publicSettings, siteInfo, updateSettings } from './settings.js';
 import { RSS_READERS } from './serve.js';
 import { hasRole, identify, login, logoutCookie, sameOrigin } from './auth.js';
 import { SIDECAR, TgError, isStub, realSize, tgDelete, tgPut, tgReady } from './telegram.js';
@@ -47,8 +47,11 @@ export async function handleApi(request, env, ctx, url) {
     } catch {
       return json({ error: 'bad_key' }, 400);
     }
-    if (!key) return json({ error: 'bad_key' }, 400);
-    if (!hasRole(role, 'admin') && !recent(key)) return json({ error: 'forbidden' }, 403);
+    if (!isFileKey(key)) return json({ error: 'bad_key' }, 400);
+    if (!hasRole(role, 'admin')) {
+      if (!recent(key)) return json({ error: 'forbidden' }, 403);
+      if (!(await keyExists(env, key))) return json({ error: 'not_found' }, 404);
+    }
     await removeKeys(env, url, [key]);
     return json({ ok: true, key });
   }
@@ -148,24 +151,29 @@ export async function handleApi(request, env, ctx, url) {
       if (!Object.keys(themePatch).length) return json({ error: 'bad_request' }, 400);
     }
     if (!Object.keys(next).length && !bgPatch && !themePatch) return json({ error: 'bad_request' }, 400);
-    const cur = await getSettings(env, { fresh: true });
-    if (bgPatch) next.bg = { ...cur.bg, ...bgPatch };
-    if (themePatch) next.theme = { ...cur.theme, ...themePatch };
-    return json(settingsOut(env, await saveSettings(env, { ...cur, ...next })));
+    const saved = await updateSettings(env, (cur) => {
+      const merged = { ...cur, ...next };
+      if (bgPatch) merged.bg = { ...cur.bg, ...bgPatch };
+      if (themePatch) merged.theme = { ...cur.theme, ...themePatch };
+      return merged;
+    });
+    return json(settingsOut(env, saved));
   }
   // POST /api/exempt {keys, on}：单张防盗链开关。on=true 表示这几张允许外链
   if (path === '/api/exempt' && method === 'POST') {
     const body = await request.json().catch(() => null);
-    const keys = Array.isArray(body?.keys) ? body.keys.filter((k) => typeof k === 'string' && k && !k.startsWith('.')) : [];
+    const keys = Array.isArray(body?.keys) ? body.keys.filter(isFileKey) : [];
     if (!keys.length || keys.length > 1000 || typeof body.on !== 'boolean') return json({ error: 'bad_request' }, 400);
-    const cur = await getSettings(env, { fresh: true });
-    const set = new Set(cur.exempt);
-    for (const k of keys) body.on ? set.add(k) : set.delete(k);
-    return json(settingsOut(env, await saveSettings(env, { ...cur, exempt: [...set] })));
+    const saved = await updateSettings(env, (cur) => {
+      const set = new Set(cur.exempt);
+      for (const k of keys) body.on ? set.add(k) : set.delete(k);
+      return { ...cur, exempt: [...set] };
+    });
+    return json(settingsOut(env, saved));
   }
   if (path === '/api/delete' && method === 'POST') {
     const body = await request.json().catch(() => null);
-    const keys = Array.isArray(body?.keys) ? body.keys.filter((k) => typeof k === 'string' && k) : [];
+    const keys = Array.isArray(body?.keys) ? body.keys.filter(isFileKey) : [];
     if (!keys.length || keys.length > 100) return json({ error: 'bad_key' }, 400);
     await removeKeys(env, url, keys);
     return json({ ok: true, deleted: keys.length });
@@ -175,7 +183,7 @@ export async function handleApi(request, env, ctx, url) {
   if (path === '/api/tg/backup' && method === 'POST') {
     if (!tgReady(env)) return json({ error: 'tg_not_configured' }, 400);
     const body = await request.json().catch(() => null);
-    const keys = Array.isArray(body?.keys) ? body.keys.filter((k) => typeof k === 'string' && k && !k.startsWith('.')) : [];
+    const keys = Array.isArray(body?.keys) ? body.keys.filter(isFileKey) : [];
     if (!keys.length || keys.length > 5) return json({ error: 'bad_key' }, 400);
     const results = [];
     for (const key of keys) {
@@ -343,30 +351,81 @@ async function putThumb(env, key, request) {
   return json({ error: 'not_found' }, 404);
 }
 
-// GET /api/list?cursor=&limit=：只列当前写入桶，按 R2 的字典序（即时间顺序）
+// GET /api/list?cursor=&limit=：遍历所有存储桶；跳过开头的内部对象（.tg/ 与 .thumb/）直到攒够真实文件或读完
 async function list(env, url) {
   const limit = Math.min(Number(url.searchParams.get('limit')) || 100, 1000);
-  const store = writeStore(env);
-  const res = await store.bucket.list({
-    limit,
-    cursor: url.searchParams.get('cursor') || undefined,
-    prefix: url.searchParams.get('prefix') || undefined,
-    include: ['httpMetadata', 'customMetadata'],
-  });
+  const prefix = url.searchParams.get('prefix') || undefined;
+  const stores = allStores(env);
+  const rawCursor = url.searchParams.get('cursor') || '';
+  let storeIdx = 0;
+  let innerCursor;
+  if (rawCursor) {
+    const m = /^(\d+):(.*)$/.exec(rawCursor);
+    if (m && Number(m[1]) < stores.length) {
+      storeIdx = Number(m[1]);
+      innerCursor = m[2] || undefined;
+    } else {
+      innerCursor = rawCursor;
+    }
+  }
+
+  const thumbs = [];
+  const backed = [];
+  const items = [];
+  let pages = 0;
+
+  while (storeIdx < stores.length && items.length < limit && pages < 10) {
+    pages++;
+    const res = await stores[storeIdx].bucket.list({
+      limit,
+      cursor: innerCursor,
+      prefix,
+      include: ['httpMetadata', 'customMetadata'],
+    });
+    for (const o of res.objects) {
+      if (o.key.startsWith(THUMB)) thumbs.push(o.key.slice(THUMB.length));
+      else if (o.key.startsWith(SIDECAR)) backed.push(o.key.slice(SIDECAR.length));
+      else if (!o.key.startsWith('.')) {
+        items.push({
+          key: o.key,
+          name: o.customMetadata?.name,
+          url: `${url.origin}/file/${encodeURIComponent(o.key)}`,
+          size: realSize(o),
+          tg: isStub(o) || undefined,
+          contentType: o.httpMetadata?.contentType,
+          uploaded: o.uploaded,
+        });
+      }
+    }
+    if (res.truncated) {
+      innerCursor = res.cursor;
+    } else {
+      storeIdx++;
+      innerCursor = undefined;
+    }
+  }
+
+  const nextCursor =
+    storeIdx < stores.length && (innerCursor || storeIdx > 0)
+      ? stores.length > 1
+        ? `${storeIdx}:${innerCursor || ''}`
+        : innerCursor || null
+      : null;
+
   return json({
-    // 「.」开头的内部对象排在最前面；其中 .thumb/ 告诉前端哪些文件已有缩略图
-    thumbs: res.objects.filter((o) => o.key.startsWith(THUMB)).map((o) => o.key.slice(THUMB.length)),
-    items: res.objects.filter((o) => !o.key.startsWith('.')).map((o) => ({
-      key: o.key,
-      name: o.customMetadata?.name,
-      url: `${url.origin}/file/${encodeURIComponent(o.key)}`,
-      size: realSize(o),
-      tg: isStub(o) || undefined,
-      contentType: o.httpMetadata?.contentType,
-      uploaded: o.uploaded,
-    })),
-    cursor: res.truncated ? res.cursor : null,
+    // 「.」开头的内部对象排在最前面；其中 .thumb/ 告诉前端哪些文件已有缩略图，.tg/ 告诉前端哪些已有 Telegram 备份
+    thumbs,
+    backed,
+    items,
+    cursor: nextCursor,
   });
+}
+
+async function keyExists(env, key) {
+  for (const s of storesFor(env, key)) {
+    if (await s.bucket.head(key)) return true;
+  }
+  return Boolean(await configStore(env).bucket.head(SIDECAR + key));
 }
 
 // 从所有桶删除。Cache API 只能清当前机房的缓存，其他机房要等过期或在面板清除
@@ -390,15 +449,14 @@ async function removeKeys(env, url, keys) {
     await tgDelete(env, msgs).catch((err) => console.warn(JSON.stringify({ event: 'tg-delete-failed', error: err.message })));
   }
   // 记进已删除名单（其他机房的缓存由读路径挡掉），顺手从防盗链豁免名单里拿掉（背景图是自由填写的地址，不跟着删）
-  const cur = await getSettings(env, { fresh: true });
-  const origins = [...new Set([url.origin, ...cur.domains.map((d) => `https://${d}`)])];
   const gone = new Set(keys);
   const now = Date.now();
-  await saveSettings(env, {
+  const saved = await updateSettings(env, (cur) => ({
     ...cur,
     exempt: cur.exempt.filter((k) => !gone.has(k)),
     gone: [...keys.filter((k) => !k.startsWith('.')).map((k) => [k, now]), ...cur.gone],
-  });
+  }));
+  const origins = [...new Set([url.origin, ...saved.domains.map((d) => `https://${d}`)])];
   await Promise.all(
     keys.flatMap((key) => {
       const path = `/file/${encodeURIComponent(key)}`;
@@ -407,23 +465,32 @@ async function removeKeys(env, url, keys) {
   );
 }
 
-// GET /api/stats：遍历当前写入桶统计数量和总大小（最多 20 页 = 2 万个对象，够用很久）
+// GET /api/stats：遍历所有存储桶统计真实文件数量和总大小（最多统计 2 万个真实文件，内部 . 对象不占额度）
 async function stats(env) {
-  const store = writeStore(env);
-  let cursor;
+  const MAX_FILES = 20000;
   let count = 0;
   let bytes = 0;
-  let pages = 0;
-  do {
-    const res = await store.bucket.list({ limit: 1000, cursor, include: ['customMetadata'] });
-    for (const o of res.objects) {
-      if (o.key.startsWith('.')) continue;
-      count++;
-      bytes += realSize(o);
-    }
-    cursor = res.truncated ? res.cursor : undefined;
-  } while (cursor && ++pages < 20);
-  return json({ count, bytes, partial: Boolean(cursor) });
+  let partial = false;
+  for (const store of allStores(env)) {
+    let cursor;
+    let pages = 0;
+    do {
+      const res = await store.bucket.list({ limit: 1000, cursor, include: ['customMetadata'] });
+      for (const o of res.objects) {
+        if (o.key.startsWith('.')) continue;
+        count++;
+        bytes += realSize(o);
+      }
+      cursor = res.truncated ? res.cursor : undefined;
+      if (count >= MAX_FILES && cursor) {
+        partial = true;
+        break;
+      }
+    } while (cursor && ++pages < 100);
+    if (cursor) partial = true;
+    if (partial) break;
+  }
+  return json({ count, bytes, partial });
 }
 
 // 文件名：保留中文等 Unicode，去掉路径分隔符、URL 特殊字符和控制字符，空白换成下划线

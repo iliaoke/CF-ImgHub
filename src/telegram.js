@@ -138,7 +138,7 @@ export async function tgPut(env, key, stream, size) {
   return { v: 1, size, chunks };
 }
 
-// 删消息（尽力而为：bot 是频道管理员且有删除权限时，任何时间的消息都能删）
+// 删消息（尽力而为：Telegram Bot API 限制 bot 只能删除 48 小时以内的消息，超时报错由调用方忽略）
 export async function tgDelete(env, msgIds) {
   for (let i = 0; i < msgIds.length; i += 100) {
     await call(env, 'deleteMessages', { chat_id: env.TG_CHAT_ID, message_ids: msgIds.slice(i, i + 100) });

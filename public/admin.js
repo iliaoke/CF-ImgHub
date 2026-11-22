@@ -12,9 +12,11 @@ let query = '';
 const selected = new Set();
 let current = null;
 let thumbs = new Set(); // 已有缩略图的 key
+let backed = new Set(); // 已有 Telegram 备份的 key
+let noThumb = new Set(); // 本次会话中确认浏览器解不了的 key
 const SMALL = 1024 * 1024; // 没有缩略图时，这么小的原图直接拿来显示
 // 浏览器解不了、补不出缩略图的类型
-const NO_THUMB = /^image\/(heic|heif|tiff|jxl|svg)/i;
+const NO_THUMB = /^image\/(heic|heif|tiff|jxl|svg|x-icon|vnd\.microsoft\.icon)/i;
 
 initLang();
 topbarShadow();
@@ -85,6 +87,7 @@ async function load() {
   api('/api/settings').then((r) => r.ok && applySettings(r.body));
 
   thumbs = new Set();
+  backed = new Set();
   let cursor = '';
   do {
     const r = await api(`/api/list?limit=1000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
@@ -96,6 +99,7 @@ async function load() {
     }
     all.push(...r.body.items);
     for (const k of r.body.thumbs ?? []) thumbs.add(k);
+    for (const k of r.body.backed ?? []) backed.add(k);
     cursor = r.body.cursor;
   } while (cursor);
   all.sort((a, b) => timeOf(b) - timeOf(a));
@@ -183,7 +187,7 @@ function tileImg(o) {
 
 // ---------- 补缩略图：给还没有缩略图的旧文件在浏览器里生成 ----------
 let filling = false;
-const missingThumbs = () => all.filter((o) => kindOf(o) === 'image' && !NO_THUMB.test(o.contentType) && !thumbs.has(o.key));
+const missingThumbs = () => all.filter((o) => kindOf(o) === 'image' && !NO_THUMB.test(o.contentType) && !thumbs.has(o.key) && !noThumb.has(o.key));
 function syncThumbFill(done = 0, total = 0) {
   const b = $('#thumbFill');
   const n = missingThumbs().length;
@@ -205,7 +209,10 @@ $('#thumbFill').onclick = async () => {
         const res = await fetch(o.url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const th = await makeThumb(await res.blob());
-        if (!th) throw new Error('undecodable');
+        if (!th) {
+          noThumb.add(o.key);
+          throw new Error('undecodable');
+        }
         await putThumb(o.key, th);
         thumbs.add(o.key);
         const el = [...document.querySelectorAll('.tile')].find((x) => x.dataset.key === o.key);
@@ -269,9 +276,18 @@ async function remove(keys) {
   }
   const gone = new Set(keys);
   for (const el of document.querySelectorAll('.tile')) if (gone.has(el.dataset.key)) el.classList.add('out');
-  for (const k of keys) selected.delete(k);
+  for (const k of keys) {
+    selected.delete(k);
+    exempt.delete(k);
+    thumbs.delete(k);
+    backed.delete(k);
+    noThumb.delete(k);
+  }
+  settings.exempt = [...exempt];
+  $('#exemptCount').textContent = t('exemptN', { n: exempt.size });
   all = all.filter((o) => !gone.has(o.key));
   syncSelection();
+  syncThumbFill();
   snack(t('deletedN', { n: keys.length }));
   setTimeout(render, 250);
   api('/api/stats').then((r) => {
@@ -307,7 +323,7 @@ function openDetail(o) {
   $('[data-f=type]', dlg).textContent = o.contentType || '—';
   $('[data-f=size]', dlg).textContent = `${size(o.size)} (${o.size.toLocaleString()} B)`;
   $('[data-f=uploaded]', dlg).textContent = when(timeOf(o));
-  $('[data-f=store]', dlg).textContent = o.tg ? 'Telegram' : 'R2';
+  $('[data-f=store]', dlg).textContent = o.tg ? 'Telegram' : backed.has(o.key) ? 'R2 + Telegram' : 'R2';
   $('[data-f=key]', dlg).textContent = o.key;
   $('[data-f=name]', dlg).textContent = o.name || '';
   for (const el of dlg.querySelectorAll('.orig')) el.hidden = !o.name;
@@ -316,6 +332,11 @@ function openDetail(o) {
   for (const b of dlg.querySelectorAll('[data-copy]')) b.onclick = () => copyText(snippet(b.dataset.copy, entry), null);
   dlg.showModal();
 }
+document.addEventListener('domainchange', () => {
+  if (!current || !dlg.open) return;
+  $('[data-f=url]', dlg).textContent = linkOf(current.url);
+  $('[data-open]', dlg).href = linkOf(current.url);
+});
 $('.setting', dlg).onclick = () => saveSetting('/api/exempt', { keys: [current.key], on: !exempt.has(current.key) }, $('[data-exempt]', dlg));
 $('.close', dlg).onclick = () => dlg.close();
 dlg.addEventListener('click', (e) => e.target === dlg && dlg.close());

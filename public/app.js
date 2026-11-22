@@ -20,7 +20,7 @@ const opts = {
   live: store.get('live', '2'), // 实况照片：0 原样 / 1 精简 / 2 标准 / 3 紧凑 / 4 极致
   gps: store.get('gps', '1'), // 去除定位（默认开）
 };
-// 实况主图的 JPEG 质量（原档约 q97，q90 时肉眼无差，见 AGENTS.md §5.5）
+// 实况主图的 JPEG 质量（原档约 q97，q90 时肉眼无差）
 const LIVE_Q = { high: 0.95, balanced: 0.9, small: 0.85 };
 const UNDO_WINDOW = 24 * 3600 * 1000;
 let session = { role: null };
@@ -81,7 +81,7 @@ const setOver = (on) => {
   dropShape.speed(on ? 4 : 1);
 };
 $('#files').onchange = (e) => {
-  addFiles(e.target.files);
+  if (e.target.files?.length) addFiles(e.target.files);
   e.target.value = '';
 };
 // 整个窗口都接受拖放，拖入时高亮上传区
@@ -163,14 +163,23 @@ async function keepReason(file) {
   const isAvif = isIsoBmff && /avif|avis/.test(head.slice(8, 40));
   const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
   const isJxl = (bytes[0] === 0xff && bytes[1] === 0x0a) || head.slice(4, 8) === 'JXL ';
+  const hdrRe = /hdrgm|HDRGainMap|GainMap|iso:ts:21496|21496-1/;
 
   if (isPng && head.includes('acTL') && head.indexOf('acTL') < head.indexOf('IDAT')) return 'rAnimated';
   if (isWebp && head.includes('ANIM')) return 'rAnimated';
   if (isIsoBmff && head.slice(8, 40).includes('avis')) return 'rAnimated';
   if (isJpeg && /MotionPhoto|MicroVideo|OpCamera:VideoLength/.test(head)) return 'rLive';
-  if (isJpeg && /hdrgm|HDRGainMap|iso:ts:21496/.test(head)) return 'rHdr';
+  if (isJpeg && hdrRe.test(head)) return 'rHdr';
+  // 部分 Ultra HDR / ISO 21496-1 静态 JPEG 的增益图元数据写在文件尾部的副图头部（主图只有 MPF）
+  if (isJpeg && head.includes('MPF\0') && file.size > 512 * 1024) {
+    const tail = new TextDecoder('latin1').decode(new Uint8Array(await file.slice(-512 * 1024).arrayBuffer()));
+    if (hdrRe.test(tail)) return 'rHdr';
+  }
   if (isIsoBmff && head.includes('tmap')) return 'rHdr';
-  if (opts.mode === 'auto' && (isAvif || isWebp || isJxl)) return 'rEfficient';
+  if (opts.mode === 'auto' && (isAvif || isWebp || isJxl)) {
+    // 设了最长边时，先交给解码器看尺寸是否超标；未超标再按 rEfficient 原样上传
+    return opts.edge === '0' ? 'rEfficient' : 'rCheckEdge';
+  }
   return null;
 }
 
@@ -184,6 +193,7 @@ const release = () => (pending.length ? pending.shift()() : active--);
 
 let queued = 0;
 async function addFiles(list) {
+  if (!list?.length) return;
   $('#queueSec').hidden = false;
   await Promise.all([...list].map(processFile));
 }
@@ -207,20 +217,27 @@ async function processFile(file) {
         blob = r.blob;
         chips.push(...r.chips);
       }
-    } else if (!reason) {
+    } else if (!reason || reason === 'rCheckEdge') {
+      const checkOnly = reason === 'rCheckEdge';
+      reason = null;
       ui.status(t('sConverting'), null);
       let bitmap = null;
       try {
         bitmap = await createImageBitmap(file);
       } catch {
-        reason = 'rUndecodable';
+        reason = checkOnly ? 'rEfficient' : 'rUndecodable';
+      }
+      if (bitmap && checkOnly && Math.max(bitmap.width, bitmap.height) <= Number(opts.edge)) {
+        bitmap.close();
+        bitmap = null;
+        reason = 'rEfficient';
       }
       if (bitmap) {
         const format = opts.mode === 'auto' ? 'avif' : opts.format;
         const out = await convert(bitmap, format);
         const converted = new Blob([out.buf], { type: `image/${format}` });
-        // 只缩放不换格式时，体积变大也接受；否则转出来更大就用原图
-        if (converted.size >= file.size && opts.edge === '0') {
+        // 压完变大时一律自动用原图
+        if (converted.size >= file.size) {
           reason = 'rLarger';
         } else {
           blob = converted;
@@ -364,6 +381,7 @@ function itemView({ name, thumb, type, fallback }) {
     },
     done(entry, chips = []) {
       bar.el.remove();
+      el.dataset.key = entry.key;
       $('.item-name', el).textContent = entry.name;
       $('.item-name', el).title = entry.key;
       meta.replaceChildren(...chips.map(([cls, text]) => Object.assign(document.createElement('span'), { className: `chip ${cls}`, textContent: text })));
@@ -398,8 +416,17 @@ function fillActions(box, entry, el) {
       }
       snack(t('deleted'));
       removeHistory(entry.key);
-      el.classList.add('out');
-      setTimeout(() => el.remove(), 300);
+      for (const qEl of $('#queue').querySelectorAll('li')) {
+        if (qEl.dataset.key === entry.key) {
+          qEl.classList.add('out');
+          setTimeout(() => {
+            qEl.remove();
+            queued = $('#queue').childElementCount;
+            $('#queueCount').textContent = queued;
+            if (!queued) $('#queueSec').hidden = true;
+          }, 300);
+        }
+      }
     });
   }
 }

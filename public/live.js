@@ -3,7 +3,7 @@
 // 文件布局：主图 JPEG ‖ [增益图 JPEG] ‖ 视频 MP4 ‖ [OPlus 私有尾部]
 // 级别：1 精简 = 去私有尾部与高通调试段（画质无损）
 //       2 标准 = 以上 + 主图重新编码（保留 EXIF / XMP / ICC，HDR 增益图原样）
-//       3 紧凑 = 以上 + 实况视频转 SDR（浏览器拿不到 10-bit 像素，只能经 canvas 转 SDR，见 AGENTS.md §5.5）
+//       3 紧凑 = 以上 + 实况视频转 SDR（浏览器 WebCodecs 经 canvas 取 8-bit 帧转 SDR）
 //       4 极致 = 以上 + 去掉增益图（不再是 HDR），可按最长边缩小
 
 const XMP_NS = 'http://ns.adobe.com/xap/1.0/\0';
@@ -141,7 +141,7 @@ export async function slimLive(live, level, encode, encodeVideo) {
   const tail = new Uint8Array(0); // 各级都去掉私有尾部
   const keepMpf = keepGain || !live.gainmap; // 只有主图一项的 MPF（微信版）照留，只修补大小
 
-  // 主图正文：级别 ≥2 才重编码，且至少小 10% 才换（已经压过的图不再折腾）
+  // 主图正文：级别 ≥2 才重编码；级别 2–3 至少小 10% 才换（已经压过的图不再折腾），级别 4 只要变小就换（绝不换成更大的主图）
   const oldBody = bodyOf(live.primary);
   let body = oldBody;
   let recoded = false;
@@ -149,7 +149,7 @@ export async function slimLive(live, level, encode, encodeVideo) {
     const out = await encode(new Blob([live.primary], { type: 'image/jpeg' }), level >= 4);
     if (out) {
       const nb = bodyOf(out);
-      if (nb.length < oldBody.length * 0.9 || level >= 4) {
+      if (nb.length < (level >= 4 ? oldBody.length : oldBody.length * 0.9)) {
         body = nb;
         recoded = true;
       }
@@ -175,7 +175,7 @@ export async function slimLive(live, level, encode, encodeVideo) {
   if (live.legacyOffset) xmp = xmp.replace(/GCamera:MicroVideoOffset="\d+"/, `GCamera:MicroVideoOffset="${motionLen}"`);
   if (!keepGain && live.gainmap) {
     xmp = xmp
-      .replace(/<rdf:li\b[^>]*>\s*<Container:Item\b[^>]*Item:Semantic="GainMap"[^>]*\/>\s*<\/rdf:li>/g, '')
+      .replace(/<rdf:li\b[^>]*>\s*<Container:Item\b[^>]*Item:Semantic="GainMap"[^>]*\/?>(?:\s*<\/Container:Item>)?\s*<\/rdf:li>/g, '')
       .replace(/\s*hdrgm:Version="[^"]*"/g, '')
       .replace(/\s*xmlns:hdrgm="[^"]*"/g, '');
   }
