@@ -2,14 +2,13 @@
 import { t } from './i18n.js';
 import { parseLive, slimLive, transcodeVideo } from './live.js';
 import { stripGps } from './gps.js';
-import { makeThumb, putThumb, thumbUrl } from './thumb.js';
+import { clearLocalThumbs, dropLocalThumb, localThumbUrl, makeThumb, putThumb } from './thumb.js';
 import { $, api, canDo, confirmBox, copyText, errText, gate, icon, initLang, logout, morph, setShape, size, snack, snippet, topbarShadow, when, wavy } from './ui.js';
 
 const store = {
   get: (k, d) => localStorage.getItem(`imghub.${k}`) ?? d,
   set: (k, v) => localStorage.setItem(`imghub.${k}`, v),
 };
-localStorage.removeItem('imghub.token'); // 旧版本存的上传密钥，已改用登录会话
 
 const opts = {
   mode: store.get('mode', 'auto'),
@@ -343,7 +342,7 @@ function expired() {
 }
 
 // ---------- 列表项 ----------
-function itemView({ name, thumb, type, fallback }) {
+function itemView({ name, thumb, type }) {
   const el = document.createElement('li');
   el.innerHTML = '<div class="thumb"></div><div class="item-body"><div class="item-name"></div><div class="item-meta"></div></div><div class="acts"></div>';
   const th = $('.thumb', el);
@@ -352,16 +351,13 @@ function itemView({ name, thumb, type, fallback }) {
     img.alt = '';
     img.loading = 'lazy';
     img.decoding = 'async';
-    img.src = thumb;
-    // 本机文件的预览用完就释放（已显示的画面不受影响）
-    const free = () => thumb.startsWith('blob:') && URL.revokeObjectURL(thumb);
+    const free = () => img.src.startsWith('blob:') && URL.revokeObjectURL(img.src);
     img.onload = free;
     img.onerror = () => {
       free();
-      // 没有缩略图（旧记录）时退回原图
-      if (fallback && img.src !== new URL(fallback, location.href).href) img.src = fallback;
-      else img.replaceWith(icon('file'));
+      img.replaceWith(icon('file'));
     };
+    Promise.resolve(thumb).then((u) => (u ? (img.src = u) : img.onerror()));
     th.append(img);
   } else {
     th.append(icon(type?.startsWith('video/') ? 'movie' : 'file'));
@@ -409,10 +405,7 @@ function fillActions(box, entry, el, isGone = false) {
     return b;
   };
   if (isGone) {
-    btn('delete', t('remove'), () => {
-      api(thumbUrl(entry.key), { method: 'DELETE' });
-      removeHistory(entry.key);
-    });
+    btn('delete', t('remove'), () => removeHistory(entry.key));
     return;
   }
   btn('link', t('copyUrl'), (b) => copyText(snippet('url', entry), b));
@@ -444,10 +437,13 @@ function fillActions(box, entry, el, isGone = false) {
   }
 }
 
-// ---------- 上传记录（只存本机，每次刷新页面向服务端核对是否已删） ----------
+// ---------- 上传记录（只存本机，缩略图也缓存在本机 Cache Storage；每次刷新页面向服务端核对是否已删） ----------
 let goneKeys = new Set();
 const loadHistory = () => JSON.parse(store.get('history', '[]'));
-const saveHistory = (h) => store.set('history', JSON.stringify(h.slice(0, 300)));
+const saveHistory = (h) => {
+  for (const old of h.slice(300)) dropLocalThumb(old.key);
+  store.set('history', JSON.stringify(h.slice(0, 300)));
+};
 function addHistory(entry) {
   goneKeys.delete(entry.key);
   saveHistory([entry, ...loadHistory()]);
@@ -455,6 +451,7 @@ function addHistory(entry) {
 }
 function removeHistory(key) {
   goneKeys.delete(key);
+  dropLocalThumb(key);
   saveHistory(loadHistory().filter((e) => e.key !== key));
   renderHistory();
 }
@@ -466,7 +463,7 @@ function renderHistory() {
   $('#clearHistory').hidden = !list.length;
   for (const entry of list) {
     const isGone = goneKeys.has(entry.key);
-    const ui = itemView({ name: entry.name, thumb: thumbUrl(entry.key), fallback: isGone ? null : entry.url, type: entry.type });
+    const ui = itemView({ name: entry.name, thumb: localThumbUrl(entry.key), type: entry.type });
     const chips = isGone ? [['error', t('deleted')]] : [];
     chips.push(['', size(entry.size)], ['', when(entry.time)]);
     ui.done(entry, chips, isGone);
@@ -482,8 +479,8 @@ async function checkHistory() {
   if (goneKeys.size) renderHistory();
 }
 $('#clearHistory').onclick = () => {
-  for (const k of goneKeys) api(thumbUrl(k), { method: 'DELETE' });
   goneKeys.clear();
+  clearLocalThumbs();
   saveHistory([]);
   renderHistory();
 };

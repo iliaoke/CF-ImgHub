@@ -6,7 +6,6 @@
 // rss：是否放行内建的网页版 RSS 阅读器名单（默认开）。
 // storage：新上传存到哪里：r2（默认）/ r2+tg（R2 + Telegram 备份）/ tg（只存 Telegram）；没设 TG_BOT_TOKEN、TG_CHAT_ID 时一律按 r2。
 // bg：登录页 / 上传页背景，urls 是图片地址（https 完整地址或本站 /file/… 路径，最多 5 个，多于 1 个时轮播），interval 为轮播秒数。
-// 旧版存的是 keys（本图床的 key），读取时自动转成 /file/<key>。
 // theme：{color, mode, logo, glow}。glow：各页（含登录页）的撞色渐层背景，默认 true。logo=true 时 Logo 与站名改用主题色（默认 false = 枫橙 Logo）。color 是预设名（见 THEME_COLORS，配色在前端 theme.js 生成）或 #rrggbb 自定义种子色；
 // mode = auto（访客可自己切换深浅色，默认跟随系统）| light | dark（强制，所有访客生效，切换按钮隐藏）。登录前就要用，经 /api/site 公开。
 // name：站点名称（页面标题、顶栏、页脚），空字符串 = 默认 CF ImgHub；登录前就要用，经 /api/site 公开。
@@ -113,7 +112,7 @@ function normalize(d) {
     gone: normGone(d?.gone),
     domains: Array.isArray(d?.domains) ? [...new Set(d.domains.map(normSite).filter(Boolean))].slice(0, MAX_DOMAINS) : [],
     bg: {
-      urls: [...new Set((Array.isArray(bg.urls) ? bg.urls : Array.isArray(bg.keys) ? bg.keys.filter(isFileKey).map((k) => `/file/${encodeURIComponent(k)}`) : []).map(normBgUrl).filter(Boolean))].slice(0, MAX_BG),
+      urls: [...new Set((Array.isArray(bg.urls) ? bg.urls : []).map(normBgUrl).filter(Boolean))].slice(0, MAX_BG),
       login: typeof bg.login === 'boolean' ? bg.login : DEFAULTS.bg.login,
       upload: typeof bg.upload === 'boolean' ? bg.upload : DEFAULTS.bg.upload,
       interval: BG_INTERVALS.includes(bg.interval) ? bg.interval : DEFAULTS.bg.interval,

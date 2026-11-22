@@ -66,8 +66,8 @@ export async function handleApi(request, env, ctx, url) {
     return json({ ok: true, key });
   }
 
-  // 缩略图（浏览器生成的 WebP，见 public/thumb.js）：登录即可读；上传角色只能给 24 小时内的文件写；已删文件移除记录时可顺手删缩略图
-  if (path.startsWith('/api/thumb/') && (method === 'GET' || method === 'POST' || method === 'DELETE')) {
+  // 缩略图（浏览器生成的 WebP，见 public/thumb.js）：登录即可读；上传角色只能给 24 小时内的文件写
+  if (path.startsWith('/api/thumb/') && (method === 'GET' || method === 'POST')) {
     let key;
     try {
       key = decodeURIComponent(path.slice('/api/thumb/'.length));
@@ -76,11 +76,6 @@ export async function handleApi(request, env, ctx, url) {
     }
     if (!isFileKey(key)) return json({ error: 'bad_key' }, 400);
     if (method === 'GET') return getThumb(env, key);
-    if (method === 'DELETE') {
-      if (!hasRole(role, 'admin') && !(await getSettings(env)).goneSet.has(key) && !recent(key)) return json({ error: 'forbidden' }, 403);
-      await Promise.all(allStores(env).map((s) => s.bucket.delete(THUMB + key)));
-      return json({ ok: true });
-    }
     if (!hasRole(role, 'admin') && !recent(key)) return json({ error: 'forbidden' }, 403);
     return putThumb(env, key, request);
   }
@@ -140,7 +135,6 @@ export async function handleApi(request, env, ctx, url) {
         if (bad !== undefined) return json({ error: 'bad_url', site: String(bad) }, 400);
         b.urls = urls;
       }
-      delete b.keys;
       if (('login' in b && typeof b.login !== 'boolean') || ('upload' in b && typeof b.upload !== 'boolean')) return json({ error: 'bad_request' }, 400);
       if ('interval' in b && !BG_INTERVALS.includes(b.interval)) return json({ error: 'bad_request' }, 400);
       bgPatch = b;
@@ -190,7 +184,7 @@ export async function handleApi(request, env, ctx, url) {
     const body = await request.json().catch(() => null);
     const keys = Array.isArray(body?.keys) ? body.keys.filter(isFileKey) : [];
     if (!keys.length || keys.length > 100) return json({ error: 'bad_key' }, 400);
-    await removeKeys(env, url, keys, { keepThumb: true });
+    await removeKeys(env, url, keys);
     return json({ ok: true, deleted: keys.length });
   }
   if (path === '/api/tg/status' && method === 'GET') return tgStatus(env);
@@ -502,8 +496,8 @@ async function keyExists(env, key) {
   return Boolean(await configStore(env).bucket.head(SIDECAR + key));
 }
 
-// 从所有桶删除。后台删除时保留 .thumb/ 缩略图，供上传页「上传记录」在显示「已删除」时仍能认出是哪张图
-async function removeKeys(env, url, keys, { keepThumb = false } = {}) {
+// 从所有桶删除（含原图、.thumb/ 缩略图、.tg/ 备份清单与 Telegram 消息）
+async function removeKeys(env, url, keys) {
   const stores = allStores(env);
   const main = configStore(env).bucket;
   // Telegram 里的消息（备份清单与占位对象里记着 message_id）也删掉；删不掉不影响 R2 的删除
@@ -515,9 +509,8 @@ async function removeKeys(env, url, keys, { keepThumb = false } = {}) {
       for (const s of stores) if (isStub(await s.bucket.head(key))) await collect(await s.bucket.get(key));
     }),
   );
-  const toDelete = keepThumb ? keys : [...keys, ...keys.map((k) => THUMB + k)];
   await Promise.all([
-    ...stores.map((s) => s.bucket.delete(toDelete)),
+    ...stores.map((s) => s.bucket.delete([...keys, ...keys.map((k) => THUMB + k)])),
     main.delete(keys.map((k) => SIDECAR + k)),
   ]);
   if (msgs.length && tgReady(env)) {
